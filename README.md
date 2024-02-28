@@ -1,6 +1,4 @@
-<p align="center" style="font-size:30px;">🩸☠️🦠</p>
-
-# Geny
+# Geny 🩸☠️🦠
 
 Geny is a tool for genotyping and calling alleles of the KIR region in the human genome
 from whole-genome sequencing data.
