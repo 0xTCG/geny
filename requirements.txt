@@ -1,0 +1,6 @@
+gurobipy>=10.0.0
+numpy
+psutil
+pysam
+PyYAML
+tqdm
