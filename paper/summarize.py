@@ -17,12 +17,12 @@ import re
 import gzip
 import mappy
 from tqdm import tqdm
-from common import bisect_left, timeit, timing
-import parasail
+# from common import bisect_left, timeit, timing
+# import parasail
 from common import Region, Allele, Gene
 from Bio import SeqIO
 
-@timeit
+# ##@timeit
 def initialize(file="database.geny"):
     from common import Region, Allele, Gene
     import time
@@ -32,7 +32,7 @@ def initialize(file="database.geny"):
         (genes, _, _, minor_to_major) = pickle.load(fo)
     return genes, minor_to_major
 
-@timeit
+##@timeit
 def calculate_maps(genes):
     for g in genes.values():
         for a in g.alleles.values():
