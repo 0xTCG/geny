@@ -412,8 +412,24 @@ def em(sample, iteration, ROUNDS=1, EPSILON=1e-4, CUTOFF=1e-3, err = 0.01):
                 log(f'[em] {a.gene.name} {a.name} => {c}')
 
 @timeit
-def get_scc(sample, depth = 0, max_depth = 6, thr = 0.98):
-    if depth > max_depth: return
+def get_scc(sample, depth, max_depth, top = 0.96):
+    from itertools import groupby
+    if depth >= max_depth: return
+    def ranges(i):
+        for a, b in groupby(enumerate(i), lambda pair: pair[1] - pair[0]):
+            b = list(b)
+            yield b[0][1], b[-1][1]
+    
+    '''
+    given start, end position on allele, get the
+    hits whose start position fail within [start, end]
+    '''
+    def get_hits_in_range(g,a,start,end):
+        alns = sample.alignments[g][a]
+        for hi, h in enumerate(alns):
+            if h.enabled and h.st >= start and h.st <= end:
+                yield h
+
     with timing('correct hits'):
         for g in db.genes.values():
             g.new_funcs = set(m[0] for a in g.alleles.values() if a.enabled for m in a.func)
@@ -429,23 +445,6 @@ def get_scc(sample, depth = 0, max_depth = 6, thr = 0.98):
                         if h.enabled and (h.cover & 0b010) and not any(h.st <= p < h.en for p in a.new_funcs):
                             h.cover &= 0b100
                             continue
-
-    def all_covered(a, scc, landmarks):
-        for hi in scc:
-            h = sample.alignments[a.gene.name][a.name][hi]
-            if not any(h.st <= pos < h.en for pos in landmarks):
-                return False
-        return True
-
-    def get_landmarks(a, scc):
-        hits = sample.alignments[a.gene.name][a.name]
-        left = min(hits[hi].st for hi in scc)
-        right = max(hits[hi].en for hi in scc)
-        for total in range(2, right - left):
-            landmarks = set(np.linspace(left, right, total, dtype=int)) - {left, right}
-            if all_covered(a, scc, landmarks):
-                return landmarks
-        assert False, "cannot happen"
     if depth == 0:
         for r in sample.reads:
             r.ok = False
@@ -457,57 +456,61 @@ def get_scc(sample, depth = 0, max_depth = 6, thr = 0.98):
                         break
                 if r.ok: break
 
-    # get the SCC for each of the valid alleles
+    if depth == 0:
+        FLANK = 150 # extend each window to left and right by FLANK
+    else:
+        FLANK = 0
+    EDGE = 50
+    sample.sccs = {}
+    for g in db.genes.values():
+        for a in g.alleles.values():
+
+            if not a.enabled: continue
+            scc = set()
+            hits = sample.alignments[a.gene.name][a.name]
+
+            ki = 0
+            for hi, h in enumerate(hits):
+                if not h.enabled or not sample.reads[h.rid].ok: continue
+                for p in range(h.st, h.en):
+                    scc.add(p)
+
+            scc = list(ranges(sorted(list(scc))))
+
+            extended = set() # added flank 
+            for r in scc:
+                for p in range(max(r[0]-FLANK,EDGE), min(r[1]+FLANK,len(a.seq)-EDGE)):
+                    extended.add(p)
+            
+            sample.sccs[a.gene.name,a.name] = list(ranges(sorted(list(extended))))
+
+    # get landmarks
+    DIST = 50
     sample.landmarks = {}
     for g in db.genes.values():
         for a in g.alleles.values():
             if not a.enabled: continue
-            landmarks = set()
-            hits = sample.alignments[a.gene.name][a.name]
-            scc, scc_en = [], 0
+            sample.landmarks[a.gene.name, a.name] = []
+            for scc in sample.sccs[a.gene.name, a.name]:
+                l = list(range(scc[0], scc[1]+1, DIST))
+                # print(l)
+                for k in l:
+                    sample.landmarks[a.gene.name, a.name].append(k)
+    
+    def get_hits(g, a, p):
+        alns = sample.alignments[g][a]
+        for hi, h in enumerate(alns):
+            if h.enabled and h.st <= p < h.en:
+                yield hi, h
 
-            key_landmarks = sorted(a.new_funcs)
-            ki = 0
-            for hi, h in enumerate(hits):
-                if not h.enabled or not sample.reads[h.rid].ok:
-                    continue
-                while ki < len(key_landmarks) and key_landmarks[ki] < h.st:
-                    ki += 1
-                if ki < len(key_landmarks) and h.st <= key_landmarks[ki] < h.en:
-                    continue
-
-                if h.st < scc_en:
-                    scc.append(hi)
-                    scc_en = max(scc_en, h.en)
-                else:
-                    if scc:
-                        l = get_landmarks(a, scc)
-                        landmarks |= l
-                    scc, scc_en = [hi], h.en
-            if scc:
-                l = get_landmarks(a, scc)
-                landmarks |= l
-            landmarks |= set(key_landmarks)
-            sample.landmarks[a.gene.name, a.name] = landmarks
-    log(f"[scc] num_landmarks={sum(len(i) for i in sample.landmarks.values()):,}")
-
-    extra_reads = 0
-    for r in sample.reads:
-        if r.ok: continue
-        for gn, g in r.alignments.items():
-            for an, hits in g.items():
-                if not db.genes[gn].alleles[an].enabled: continue
-                landmarks = sample.landmarks.get((gn, an), [])
-                if any(any(h.st <= l < h.en for l in landmarks) for h in hits if h.enabled):
-                    extra_reads += 1
-                    r.ok = True
-                    break
-            if r.ok: break
-    log(f"[scc] valid_alleles={sum(1 for a in db.alleles() if a.enabled):,}")
-    log(f"[scc] valid_reads={sum(1 for r in sample.reads if r.ok):,}")
-    log(f"[scc] {extra_reads=:,}")
-
-    # check if 1 of the read in ok reads could be mapped to an allele where there is no landmark
+    for g in db.genes.values():
+        for a in g.alleles.values():
+            if not a.enabled: continue
+            landmarks = sample.landmarks[a.gene.name, a.name]
+            for l in landmarks:
+                for hi, h in get_hits(a.gene.name, a.name, l):
+                    sample.reads[h.rid].ok = True
+            
     captured = 0
     not_captured = 0
     for r in sample.reads:
@@ -529,8 +532,9 @@ def get_scc(sample, depth = 0, max_depth = 6, thr = 0.98):
                         else:
                             captured += 1
     perc = captured / (captured + not_captured)
-    if perc < thr:
-        get_scc(sample, depth+1, max_depth, thr)
+    print(f'percentage of captured is {perc}')
+    if perc >= top: return
+    get_scc(sample, depth+1, max_depth)
 
 if __name__ == "__main__":
     with timing("em_scc"):
@@ -549,33 +553,39 @@ if __name__ == "__main__":
 #%%
 @timeit
 def ilp_solve(sample):
+    from math import ceil
     from gurobipy import GRB, Model, quicksum, Env
+
+    # env = Env(params = params)
     env = Env(empty=True)
     # env.setParam("OutputFlag", 0)
     env.start()
-
+    
     def get_hits(g, a, p):
         alns = sample.alignments[g][a]
         for hi, h in enumerate(alns):
             if h.enabled and sample.reads[h.rid].ok and h.st <= p < h.en:
+                # print(g, a, h.cost)
                 yield hi, h
 
     valid_alleles = sorted((a.gene.name, a.name, 0) for a in db.alleles() if a.enabled)
+    # print(f'[ilp] {len(valid_alleles)=:,}')
     valid_reads = set(i for i, r in enumerate(sample.reads) if r.ok)
-    log(f'[ilp] {len(valid_reads)=:,}')
+    print(f'[ilp] {len(valid_reads)=:,}')
 
     # run the ILP and get result
     V = {}  # assignment variable (read -> allele)
     A = {}  # allele chosing variable (1 if an allele is chosen)
     D = {}
     model = Model('geny', env=env)
-    model.setParam("Threads", args.threads)
+    model.setParam("Threads", THREADS)
     model.setParam("Presolve", 2)  # agressive presolve
     model.setParam("PreSparsify", 2)  # matrix sparsification
     model.setParam("NonConvex", 2)
     model.setParam('MIPGap', 0.05)
+    # model.setParam('PoolSolutions', 50)
     model.setParam('TimeLimit',180*60)
-
+    # Best objective 9.060000000000e+02, best bound 9.060000000000e+02, gap 0.0000%
     for i, (gn, an, _) in enumerate(valid_alleles[::]):  # allele
         max_cn = min(sum(1 for h in sample.alignments[gn][an]
                            if h.enabled if sample.reads[h.rid].ok
@@ -612,54 +622,67 @@ def ilp_solve(sample):
     for i in range(len(valid_alleles)):  # allele
         model.addConstr(A[i] <= quicksum(V[i, hi, j] for j, hi in mapped_reads_positions[i]))
 
+    max_land = max(len(l) for l in sample.landmarks.values())
     Z = {}
     Z_costs = []
+    DEL = {}
     for i, (gene, allele, _) in enumerate(valid_alleles):
         landmarks = sample.landmarks.get((gene, allele), [])
+        avg = []
         for pos in landmarks:
             Z[i, pos] = model.addVar(lb=0, vtype=GRB.CONTINUOUS)
             actual_coverage_on_lm = quicksum(V[i, hi, h.rid] for hi, h in get_hits(gene, allele, pos))
+            actual_ferf_coverage_on_lm = quicksum(V[i, hi, h.rid] for hi, h in get_hits(gene, allele, pos) if h.cost == 0)
 
-            e = A[i] * sample.expected_coverage - actual_coverage_on_lm
+            e = A[i] * (sample.expected_coverage) - actual_coverage_on_lm
+
             model.addConstr(Z[i, pos] + e >= 0)
             model.addConstr(Z[i, pos] - e >= 0)
             Z_costs.append(Z[i, pos] / sample.expected_coverage)
+            avg.append(actual_coverage_on_lm)
 
-            # ensure that allele MUST select a landmark!
-            if pos in db.genes[gene].alleles[allele].new_funcs:
-                model.addConstr(actual_coverage_on_lm >= A[i])
-
+        g_low = 0.5
+        g_high = 1.5
+        model.addConstr(quicksum(c for c in avg)/len(landmarks) >= g_low*A[i]*sample.expected_coverage)
+        model.addConstr(quicksum(c for c in avg)/len(landmarks) <= g_high*A[i]*sample.expected_coverage)
     A_costs = []
-    allele_selection_cost = 1
-    for i, (_, an, _) in enumerate(valid_alleles):
+    allele_selection_cost = 0
+    for i, _ in enumerate(valid_alleles):
         A_costs.append(A[i] * allele_selection_cost)
 
     # constraint the percentage of dropped reads
     D_costs = []
     read_drop_cost = 0.08
     NUM_DROPPED = quicksum(D[j] for j in valid_reads)
-    MAX_DROP_PERC = 0.2
+    MAX_DROP_PERC = 0.20
     model.addConstr(NUM_DROPPED/len(valid_reads) <= MAX_DROP_PERC)
+
+
     for j in valid_reads: # read
         D_costs.append(D[j] * read_drop_cost)
 
     NM_costs = []
     nm_cost = 0.05
-    penalty = 4
+    penalty = 4 # it has to be this, not 2.7
     max_cost = 0
+    prob = ()
     gn_prob = ''
     an_prob = ''
     hi_prob = 0
     for (i, hi, _), v in V.items():
         gn, an, _ = valid_alleles[i]
         sa = sample.alignments[gn][an]
-        NM_costs.append(nm_cost * (pow(penalty, sa[hi].cost)-1) * v)
+        # print(gn, an, hi, sa[hi].cost, '&')
+        # NM_costs.append(nm_cost * (np.exp(sa[hi].cost)-1) * v)
+        NM_costs.append(nm_cost * sa[hi].cost * v)
+        # NM_costs.append(nm_cost * (pow(penalty, sa[hi].cost)-1) * v)
         max_cost = max(max_cost, sa[hi].cost)
         gn_prob = gn
         an_prob = an
         hi_prob = hi
 
-    log(f'[ilp] {max_cost=}; {gn_prob=}; {an_prob=}; {hi_prob=}')
+    print(f'max_cost is {max_cost} {gn_prob} {an_prob} {hi_prob}')
+
     Z_cost = quicksum(Z_costs)
     A_cost = quicksum(A_costs)
     D_cost = quicksum(D_costs)
@@ -667,20 +690,19 @@ def ilp_solve(sample):
     model.setObjective(Z_cost + A_cost + D_cost + NM_cost)
 
     model.optimize()
-    log(f'[ilp] {model.objVal=:.1f}')
-    log(f'[ilp] {Z_cost.getValue()=:.1f}')
-    log(f'[ilp] {A_cost.getValue()=:.1f}')
-    log(f'[ilp] {D_cost.getValue()=:.1f}')
-    log(f'[ilp] {NM_cost.getValue()=:.1f}')
+    print(f'[ilp] {model.objVal=:.1f}')
+    print(f'[ilp] {Z_cost.getValue()=:.1f}')
+    print(f'[ilp] {A_cost.getValue()=:.1f}')
+    print(f'[ilp] {D_cost.getValue()=:.1f}')
+    print(f'[ilp] {NM_cost.getValue()=:.1f}')
 
     sol_A = []
     sol_R = collections.defaultdict(list)
-    print('Solution:')
     for (i, hi, j), v in V.items():
         if round(v.x) > 0:
             gn, an, _ = valid_alleles[i]
             sol_R[gn, an].append(j)
-    for i, (gene, allele, _) in enumerate(valid_alleles):
+    for i, (gene, allele, cn) in enumerate(valid_alleles):
         if round(A[i].x) > 0:
             sol_A.append((gene, allele))
             num_reads_total_assigned = set()
@@ -688,9 +710,63 @@ def ilp_solve(sample):
                 for ii, hi in mapped_alleles_positions[j]:
                     if ii == i and (i, hi, j) in V and round(V[i, hi, j].X) > 0:
                         num_reads_total_assigned.add(j)
-            print(f'- {gene:8} {allele:10}  (support={len(num_reads_total_assigned):5})')
+            print(f'[ilp] {gene} {allele} => {len(num_reads_total_assigned)}')
     dropped = [j for j in valid_reads if round(D[j].x) > 0]
-    log(f'[ilp] {len(dropped)=:,}')
+    print(f'[ilp] {len(dropped)=:,}')
+
+    for ai, (gn, an, _) in enumerate(valid_alleles):
+        break
+        if round(A[ai].x) == 0: continue
+        a = db.genes[gn].alleles[an]
+        key_landmarks = sorted(a.new_funcs)
+        print('Ⓜ️', f'{a.gene.name:8} {a.name:8}', key_landmarks)
+        for l in sorted(sample.landmarks.get((a.gene.name, a.name), [])):
+            i = 0
+            if l in key_landmarks: i = 2 + int(a.mutmap[l][0] == 0)
+
+            # total read coverage
+            cov = [(hi, h)
+                    for hi, h in enumerate(sample.alignments[a.gene.name][a.name])
+                    if h.enabled if sample.reads[h.rid].ok
+                    if h.st <= l < h.en]
+            cov_sol = [(hi, h.rid)
+                        for hi, h in enumerate(sample.alignments[a.gene.name][a.name])
+                        if h.rid in sol_R[a.gene.name, a.name] if h.st <= l < h.en]
+            cov_cross = []
+            diff = abs(len(cov_sol) - sample.expected_coverage)
+            cross_gene = {h.rid for _, h in cov
+                        if any(hx.enabled
+                                for gn, ga in sample.reads[h.rid].alignments.items()
+                                if gn != a.gene.name
+                                for an, hl in ga.items()
+                                if db.genes[gn].alleles[an].enabled
+                                for hx in hl)}
+            print(f'   {a.gene.name:8} {a.name:8}', f'{l:6}', '⚪️🟠🔴'[i],
+                f'{len(cov):5,}', f'({len({h.rid for _, h in cov}):5,})',
+                f'cross={len(cross_gene):5}',
+                #f'{cov_exp:5,}', f'{cov_bad:5,}', f'{len(cov_fo):5,}',
+                "|",
+                f'{len(cov_sol):5,}',
+                #f'{len(cov_sol_exp):5,}',
+                f'{diff:5}' if diff else '',
+                a.mutmap.get(l, '')
+                )
+            if diff and False:
+                for hi, h in cov:
+                    print(f'     {h.rid:6} {h.st:5} {h.en:5} {h.cigar:10} {sample.reads[h.rid].comment:20}:', end=' ')
+                    if x := [ga for ga, r in sol_R.items() if h.rid in r]:
+                        print(*x[0])
+                    elif h.rid in dropped:
+                        print("-")
+                    else:
+                        print([(valid_alleles[i][0], valid_alleles[i][1], round(x.x))
+                            for (i, hi, j), x in V.items()
+                            if j == h.rid if round(x.x) > 0])
+        print()
+
+    # for d in dropped:
+    #     print(f'd: {sample.reads[d].name, sample.reads[d].comment}')
     return sol_A, sol_R, dropped
+
 
 answer = ilp_solve(sample)
