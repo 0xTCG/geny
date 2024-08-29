@@ -173,7 +173,7 @@ def align_minimap(file, database, MAX_NM, threads):
                 print(a.seq, file=fo)
     with timing("minimap2"):
         cmd = [
-            "minimap2",
+            "/cvmfs/soft.computecanada.ca/easybuild/software/2020/avx512/Core/minimap2/2.24/bin/minimap2",
             "-x", "sr", "--secondary=yes",  # short-read preset
             "-c",  # calculate CIGAR
             "-P", "--dual=no",  # do all-to-all mapping
@@ -535,7 +535,7 @@ if __name__ == "__main__":
                     a.old_enabled, a.enabled = a.enabled, False
                 else:
                     used.add(ma)
-        get_scc(sample)
+        get_scc(sample,0,3)
 
 #%%
 @timeit
