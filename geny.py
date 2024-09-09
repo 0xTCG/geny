@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument('-V', '--version', action="version", version="Geny v1.0 (Feb 2024)")
     parser.add_argument('-l', '--log', default=None, help="log file location")
     parser.add_argument('-c', '--coverage', type=int, default=0, help="sample coverage")
-    parser.add_argument('-t', '--threads', type=int, default=8, help="number of threads to use")
+    parser.add_argument('-t', '--threads', type=int, default=16, help="number of threads to use")
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -173,7 +173,7 @@ def align_minimap(file, database, MAX_NM, threads):
                 print(a.seq, file=fo)
     with timing("minimap2"):
         cmd = [
-            "/cvmfs/soft.computecanada.ca/easybuild/software/2020/avx512/Core/minimap2/2.24/bin/minimap2",
+            "minimap2",
             "-x", "sr", "--secondary=yes",  # short-read preset
             "-c",  # calculate CIGAR
             "-P", "--dual=no",  # do all-to-all mapping
